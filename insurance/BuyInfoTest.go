@@ -8,115 +8,180 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/mvpestretsov/go-eth-samples/insurance/util"
+
 	u "github.com/mvpestretsov/go-eth-samples/lib"
-	"math/big"
+	//"math/big"
 	"strings"
 	"sync"
 	"time"
 	//"context"
-	"context"
+	//"context"
+	"github.com/mvpestretsov/go-eth-samples/insurance/util"
+	"math/big"
+
 	"fmt"
 )
 
+var mutex = &sync.Mutex{}
+var deployCounter int = 0
+
 func main() {
 
-	/*
-		log.Println(auth.Nonce)
-		ctx := context.TODO();
-		nonce,err:=conn.NonceAt(ctx,common.HexToAddress(u.GetOwnerAddress()),nil)
-		log.Println(nonce)
-	*/
 	// Create RPC connection to a remote node
 	conn, err := ethclient.Dial(u.GetNodeAddress())
 	if err != nil {
 		log.Fatalf("Failed to connect to the Ethereum client: %v\n", err)
 	}
+	log.Printf("conn:%+v", conn)
 	// read key
 	auth, err := bind.NewTransactor(strings.NewReader(u.GetKey()), "qwe123")
 	if err != nil {
 		log.Fatalf("Failed to create authorized transactor: %v\n", err)
 	}
-	start := time.Now()
-	//compute nonce
-	nonce, err := conn.PendingNonceAt(context.TODO(), common.HexToAddress(u.GetOwnerAddress()))
-	//nonce=100
-	log.Printf("base nonce:%d ", nonce)
-	pendingTransactionCount, err := conn.PendingTransactionCount(context.TODO())
-	log.Printf("base pendingTransactionCount:%d ", pendingTransactionCount)
+	log.Printf("auth:%+v", auth)
 
-	var tryCount int = 5
-	var wg sync.WaitGroup
-	wg.Add(tryCount)
-
-	for i := 0; i < tryCount; i++ {
-		DeployAndSaveIteration(&wg, i, conn, auth, nonce)
+	nonce, err := u.GetActualNonce(conn, common.HexToAddress(u.GetOwnerAddress()))
+	if err != nil {
+		log.Fatalf("Failed to get nonce: %v\n", err)
 	}
-	wg.Wait()
+	log.Printf("base nonce:%d ", nonce)
+
+	//start to measure execution time
+	start := time.Now()
+
+	/*
+		doConcurrency(1,1, func(i int) {
+			// Make request here
+			deployBuyInfoContract(copyAuth(auth),copyClient(conn),i,nonce)
+		})
+	*/
+
+	var tryAmount int = 1
+
+	/*
+		var wg sync.WaitGroup
+
+
+		for i := 0; i < tryAmount; i++ {
+			//make local deployment
+			contractA,tx,contract,err:=deployBuyInfoContract(copyAuth(auth),copyClient(conn),nonce + uint64(i))
+			if err==nil {
+				log.Printf("%d:address:0x%x\n", i, contractA)
+				log.Printf("%d:contract:%+v", i, contract)
+				log.Printf("%d:transaction:%v", i, tx.Hash().Hex())
+				wg.Add(1)
+				//mine deployed contract
+				go  MineAndGetReceipt(&wg,copyTransaction(tx),copyClient(conn))
+			}
+		}
+		wg.Wait()
+	*/
+
+	//make needed amount of contracts
+	deployRequests := make(chan uint64, tryAmount)
+	for i := 1; i <= tryAmount; i++ {
+		deployRequests <- nonce + uint64(i)
+	}
+	close(deployRequests)
+
+	//for each contract count make deploy request
+	for req := range deployRequests {
+		contractA, tx, contract, err := deployBuyInfoContract(copyAuth(auth), copyClient(conn), req)
+		if err == nil {
+			log.Printf("%d:address:0x%x\n", req, contractA)
+			log.Printf("%d:contract:%+v", req, contract)
+			log.Printf("%d:transaction:%v", req, tx.Hash().Hex())
+			//mine deploy transaction
+			dReceipt, _ := u.MineTransaction(copyClient(conn), tx)
+			if dReceipt != nil {
+				incrementSuccessCounter()
+				//upload data to contract
+				auth.GasLimit = big.NewInt(2551488)
+				upTx, err := contract.UploadData(auth, "test")
+				if err == nil {
+					//mine upload transaction
+					uReceipt, err := u.MineTransaction(copyClient(conn), upTx)
+					if uReceipt != nil {
+						//read uploaded data from transaction
+						data, err := contract.EncryptedData(&bind.CallOpts{})
+						if err != nil {
+							log.Fatalf("Failed to get data: %v\n", err)
+						}
+						log.Printf("%d:contract:%v", req, data)
+					} else {
+						log.Printf("Failed to mine upload data: %v\n", err)
+					}
+				} else {
+					log.Printf("Failed to upload data: %v\n", err)
+				}
+			} else {
+				log.Printf("Failed to mine contract: %v\n", err)
+			}
+		}
+	}
+
 	elapsed := time.Since(start)
 	log.Printf("Execution time %s\n", elapsed)
-
+	log.Printf("deployCounter=%d", deployCounter)
 }
 
-func deployBuyInfoContract(auth *bind.TransactOpts, conn bind.ContractBackend, i int) (common.Address, *types.Transaction, *insurance.BuyInfo, error) {
-	address, tx, buyInfoC, err := insurance.DeployBuyInfo(auth, conn, common.HexToAddress(u.GetOwnerAddress()), "pk", fmt.Sprintf("%s%d", "dataH", i), "idH", u.GetStubAddress(), big.NewInt(1000), big.NewInt(1000))
+func genNonce(nonce uint64, tryAmount int) <-chan uint64 {
+	out := make(chan uint64)
+	go func() {
+		for i := 0; i < tryAmount; i++ {
+			out <- nonce + uint64(i)
+		}
+		close(out)
+	}()
+	return out
+}
+
+func doConcurrency(total, concurrency int, fn func(int)) {
+	workQueue := make(chan int, concurrency)
+
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		go func() {
+			for i := range workQueue {
+				fn(i)
+			}
+			wg.Done()
+		}()
+	}
+	for i := 0; i < total; i++ {
+		workQueue <- i
+	}
+	close(workQueue)
+	wg.Wait()
+}
+
+func MineAndGetReceipt(wg *sync.WaitGroup, tx *types.Transaction, conn *ethclient.Client) {
+	defer wg.Done()
+	log.Printf("mine transaction :%v", tx.Hash().Hex())
+	receipt, _ := u.MineTransaction(conn, tx)
+	if receipt != nil {
+		incrementSuccessCounter()
+	}
+}
+
+func incrementSuccessCounter() {
+	mutex.Lock()
+	deployCounter = deployCounter + 1
+	mutex.Unlock()
+}
+
+func deployBuyInfoContract(auth *bind.TransactOpts, conn *ethclient.Client, nonce uint64) (common.Address, *types.Transaction, *insurance.BuyInfo, error) {
+	address, tx, buyInfoC, err := insurance.DeployBuyInfo(auth, conn, common.HexToAddress(u.GetOwnerAddress()), "pk", fmt.Sprintf("%s%d", "dataHer", nonce), "idH", u.GetStubAddress(), big.NewInt(1000), big.NewInt(1000))
 	if err != nil {
 		log.Printf("Failed to deploy new BuyInfo contract: %v\n", err)
 		return u.GetStubAddress(), nil, nil, err
 	}
 	log.Printf("Contract pending deploy: 0x%x\n", address)
 	log.Printf("Transaction waiting to be mined: 0x%x\n\n", tx.Hash())
+
 	return address, tx, buyInfoC, nil
-}
-
-func DeployAndSaveIteration(wg *sync.WaitGroup, i int, conn *ethclient.Client, auth *bind.TransactOpts, nonce uint64) error {
-
-	log.Printf("%+v\n", auth)
-	//mining contract
-	//auth.GasPrice=big.NewInt(int64(2000000+i*20000+1))
-	auth.Nonce = big.NewInt(int64(nonce + uint64(i+1)))
-	//log.Printf("%d: gasPrice:%d",i,auth.GasPrice)
-	//log.Printf("%d: nonce :%d",i,auth.Nonce)
-	address, tx, contract, err := deployBuyInfoContract(auth, conn, i)
-	if err != nil {
-		log.Printf("%d:Failed to create new contract: %v\n", i, err)
-		wg.Done()
-		return err
-	}
-	log.Printf("%d: address of new BuyInfo contract:0x%x\n", i, address)
-	log.Printf("%d:tx nonce=%v", i, tx.Nonce())
-	go func() {
-		u.MineTransaction(conn, tx)
-		wg.Done()
-	}()
-	log.Println(contract)
-	//dataHash,err:=buyInfoC.DataHash(nil)
-	//if err != nil {
-	//	log.Printf("%d:Failed to retrieve dataHash: %v\n",i, err)
-	//	return err
-	//}
-	//log.Printf("encData:%v\n", dataHash)
-
-	//upload data to contract
-	/*
-		auth.GasPrice=big.NewInt(int64(2000000+i*200000+2))
-		auth.Nonce= big.NewInt(int64(nonce+uint64(i*2+2)))
-		tx, err =buyInfoC.UploadData(auth,fmt.Sprintf("%s%d","test",i))
-		if err != nil {
-			log.Printf("%d:Failed to upload data: %v\n", i,err)
-			return err
-		}
-		log.Printf("%d:upload pending: 0x%x\n", i,tx.Hash())
-		u.MineTransaction(conn,tx)
-		//read data
-		encData,err:=buyInfoC.EncryptedData(nil)
-		if err != nil {
-			log.Printf("%d:Failed to retrieve encData: %v\n",i, err)
-			return err
-		}
-		log.Printf("encData:%v\n", encData)
-	*/
-	return nil
 }
 
 func copyAuth(s *bind.TransactOpts) *bind.TransactOpts {
@@ -124,6 +189,11 @@ func copyAuth(s *bind.TransactOpts) *bind.TransactOpts {
 	return &clone // Return reference to a new struct
 }
 func copyClient(s *ethclient.Client) *ethclient.Client {
+	clone := *s   // This is where we essentially make a new struct
+	return &clone // Return reference to a new struct
+}
+
+func copyTransaction(s *types.Transaction) *types.Transaction {
 	clone := *s   // This is where we essentially make a new struct
 	return &clone // Return reference to a new struct
 }
