@@ -1,6 +1,5 @@
 pragma solidity ^ 0.4.16;
 
-
 contract Constants {
 
     enum VoteConsensus {
@@ -30,15 +29,18 @@ contract Constants {
     }
 }
 
-
 contract Administration is Constants {
 
     /***
      *
     TODO LIST:
-    1. Add Events for Adding\Removing admins and trustees
-    2. Save List of voting with status (?)
-    3. Fix public modifiers
+    1. refactor "removeXXX" voting costructor - candidate must be removed from voters
+    2. Add Events for Adding\Removing admins and trustees
+    3. Save List of voting with status (?)
+    4. Fix public modifiers
+    5. PGP - realize replacing of another's key via voting
+    6. PGP  - save key's add/update date (???)
+    7. Make list of proposals
 
      * **/
 
@@ -100,22 +102,22 @@ contract Administration is Constants {
     }
 
     function addAdmin(address _admin) callOnlyAdmin trusteeExists(_admin) notNull(_admin) doesNotAdmin(_admin) {
-        //admins.push(_admin);
-        //trueAdmin[_admin] = true;
         createVoting(msg.sender, AdminAction.ADDADMIN, _admin, VoteConsensus.ALL);
     }
 
     function removeAdmin(address _admin) callOnlyAdmin adminExists(_admin) {
         //there must be at least one admin
-        require(admins.length > 2);
-        //FIXME may be exists voting for delete admin so need to prohibit removing
+        require(admins.length > 1);
         if (_admin == msg.sender) {
-            //admin can remove self without voting
-            trueAdmin[_admin] = false;
-            removeFromArray(admins, _admin);
+            //need to prohibit removing if there is actual voting
+            if (actual.voting == 0x0) {
+                //admin can remove self without voting
+                trueAdmin[_admin] = false;
+                admins = removeFromArray(admins, _admin);
+            }
         }
         else {
-            //FIXME by voting
+            createVoting(msg.sender, AdminAction.REMOVEADMIN, _admin, VoteConsensus.ALL);
         }
     }
 
@@ -142,27 +144,29 @@ contract Administration is Constants {
     }
 
     function addTrustee(address _addr) callOnlyAdmin doesNotTrustee(_addr) {
-        //TODO by voting
-        trustees.push(_addr);
-        trueTrustee[_addr] = true;
+        createVoting(msg.sender, AdminAction.ADDTRUSTEE, _addr, VoteConsensus.HALF);
     }
 
-    function removeTrusted(address _addr) callOnlyAdmin doesNotAdmin(_addr) {
-        if (msg.sender == _addr) {//trustee may remove self without voting
+    function removeTrusted(address _addr) doesNotAdmin(_addr) {
+        if (msg.sender == _addr) {//trustee may remove himself without voting
             trueTrustee[_addr] = false;
-            removeFromArray(trustees, _addr);
+            trustees = removeFromArray(trustees, _addr);
             //remove PGP
             removeKey(_addr);
         }
         else {
-            //FIXME by voting
-            //FIXME trustees.removeElement(_addr);
-            //TODO remove PGP
+            //check if caller is admin
+            require(isAdmin(msg.sender));
+            //by voting
+            createVoting(msg.sender, AdminAction.REMOVETRUSTEE, _addr, VoteConsensus.HALF);
         }
     }
 
     /***
      * PGP Section
+     *
+     *
+     *
      **/
 
     //PGP - FIXME define length of key
@@ -191,43 +195,62 @@ contract Administration is Constants {
     struct Proposal {
     address voting;
     AdminAction action;
-    address participant;
+    address contender;
     }
 
-    //TODO must be list of proposal
     Proposal public actual;
 
     //FIXME onlyAdministration - why doesn't work ??
-    function createVoting(address owner, AdminAction action, address participant, VoteConsensus consensus) {
+    function createVoting(address owner, AdminAction action, address contender, VoteConsensus consensus) {
         //no sumultaneous votings
         require(actual.voting == 0x0);
         Voting voting = new Voting(owner, admins, consensus);
         actual = Proposal({
         voting : voting,
         action : action,
-        participant : participant
+        contender : contender
         });
     }
 
     function callback(VoteResult tally) {
+        //TODO check if voting is created by this administration
         require(msg.sender == actual.voting);
         if (tally == VoteResult.SUCCESS) {//SUCCESS
-            //TODO case action
             if (actual.action == AdminAction.ADDADMIN) {
-                //FIXME add check is participant trustee yet and not admin
-                admins.push(actual.participant);
-                trueAdmin[actual.participant] = true;
-                //disable voting
-                actual.voting = 0x0;
-                actual.action = AdminAction.UNKNOWN;
-                actual.participant = 0x0;
+                //check is contender trustee yet and not admin
+                assert(isTrusted(actual.contender) && !isAdmin(actual.contender));
+                admins.push(actual.contender);
+                trueAdmin[actual.contender] = true;
             }
-        }
-        else if (tally == VoteResult.FAIL || tally == VoteResult.CANCEL) {//FAIL or CANCEL
-            //remove voting from actual
+            if (actual.action == AdminAction.REMOVEADMIN) {
+                //check if exists one admin yet
+                assert(admins.length > 1);
+                admins = removeFromArray(admins, actual.contender);
+                delete trueAdmin[actual.contender];
+            }
+            if (actual.action == AdminAction.ADDTRUSTEE) {
+                //check is contender trustee
+                assert(!isTrusted(actual.contender));
+                //save contender in trusted
+                trustees.push(actual.contender);
+                trueTrustee[actual.contender] = true;
+            }
+            if (actual.action == AdminAction.REMOVETRUSTEE) {
+                trustees = removeFromArray(trustees, actual.contender);
+                delete trueTrustee[actual.contender];
+                //remove PGP
+                removeKey(actual.contender);
+            }
+            //disable voting
             actual.voting = 0x0;
             actual.action = AdminAction.UNKNOWN;
-            actual.participant = 0x0;
+            actual.contender = 0x0;
+        }
+        else if (tally == VoteResult.FAIL || tally == VoteResult.CANCEL) {//FAIL or CANCEL
+            //remove voting from actual; TODO save result in archive
+            actual.voting = 0x0;
+            actual.action = AdminAction.UNKNOWN;
+            actual.contender = 0x0;
         }
     }
 
@@ -243,9 +266,9 @@ contract Administration is Constants {
             }
         }
         _array.length -= 1;
+        return _array;
     }
 }
-
 
 contract Voting is Constants {
 
@@ -256,7 +279,7 @@ contract Voting is Constants {
     2. Add Timeouts
     3. Disable multithreading
     4. Fix public modifiers
-    5. Constant and enums to external contract
+
      *****/
 
     VoteState public state;
@@ -273,7 +296,7 @@ contract Voting is Constants {
 
     struct Voter {
     address addr;
-    uint vote; // FIXME enum ?
+    VoteResult vote; //enum ?
     }
     //counters
     uint public totaleligible;
@@ -295,7 +318,8 @@ contract Voting is Constants {
 
     //constructor
     function Voting(address _owner, address[] _voters, VoteConsensus consensus) {
-        //FIXME check length
+        //check length
+        assert(_voters.length > 0);
         for (uint i = 0; i < _voters.length; i++) {
             // init voter state
             if (!eligible[_voters[i]]) {
@@ -304,7 +328,7 @@ contract Voting is Constants {
                 addressid[_voters[i]] = totaleligible;
                 voters[totaleligible] = Voter({
                 addr : _voters[i],
-                vote : 0
+                vote : VoteResult.UNKNOWN
                 });
                 votecast[_voters[i]] = false;
                 totaleligible += 1;
@@ -331,7 +355,7 @@ contract Voting is Constants {
         //TODO maybe assert to withdraw gas
         if (eligible[msg.sender] && !votecast[msg.sender]) {
             votecast[msg.sender] = true;
-            voters[addressid[msg.sender]].vote = uint(VoteResult.SUCCESS);
+            voters[addressid[msg.sender]].vote = VoteResult.SUCCESS;
             totalvoted += 1;
             return true;
         }
@@ -343,7 +367,7 @@ contract Voting is Constants {
         //TODO maybe assert to withdraw gas
         if (eligible[msg.sender] && !votecast[msg.sender]) {
             votecast[msg.sender] = true;
-            voters[addressid[msg.sender]].vote = uint(VoteResult.FAIL);
+            voters[addressid[msg.sender]].vote = VoteResult.FAIL;
             totalvoted += 1;
             return true;
         }
@@ -352,18 +376,17 @@ contract Voting is Constants {
 
     function countResult() inState(VoteState.VOTE) returns (VoteResult) {
         //all must vote
-        assert(totaleligible == totalvoted);
+        require(totaleligible == totalvoted);
         uint pro = 0;
         uint contra = 0;
-        //TODO add timeout rule
         for (uint i = 0; i < totaleligible; i++) {
             //  Check all votes have been cast
-            assert(votecast[voters[i].addr]);
+            require(votecast[voters[i].addr]);
             //sum vote
-            if (voters[i].vote == uint(VoteResult.SUCCESS)) {
+            if (voters[i].vote == VoteResult.SUCCESS) {
                 pro += 1;
             }
-            if (voters[i].vote == uint(VoteResult.FAIL)) {
+            if (voters[i].vote == VoteResult.FAIL) {
                 contra += 1;
             }
         }
@@ -375,16 +398,24 @@ contract Voting is Constants {
         else {
             tally = VoteResult.FAIL;
         }
-        //FIXME make normal callback
+        //make normal callback
         Administration(administration).callback(tally);
         return tally;
     }
 
     function cancelVoting() inState(VoteState.VOTE) {
         require(msg.sender == owner);
+        //save this vote in vote array
+        if (!votecast[msg.sender]) {
+            //mark as voted
+            votecast[msg.sender] = true;
+            totalvoted += 1;
+        }
+        voters[addressid[msg.sender]].vote = VoteResult.CANCEL;
+        //set state and result
         state = VoteState.CANCELED;
         tally = VoteResult.CANCEL;
-        //FIXME send callback to whitelist to remove this vote
+        //send callback to whitelist to remove this vote
         Administration(administration).callback(tally);
     }
 
