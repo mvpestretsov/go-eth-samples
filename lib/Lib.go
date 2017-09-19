@@ -12,6 +12,7 @@ import (
 
 	"github.com/mvpestretsov/go-eth-samples/insurance/util"
 	"math/big"
+	"github.com/mvpestretsov/go-eth-samples/whitelist/contract"
 )
 
 var node_address string = "http://93.88.76.56:8545"
@@ -92,4 +93,24 @@ func GetActualNonce(client *ethclient.Client, address common.Address) (uint64, e
 type BuyInfoContract struct {
 	Nonce uint64
 	DataH string
+}
+
+func DeployAdministrationContract(auth *bind.TransactOpts, conn *ethclient.Client, tranData *AdministrationData) (common.Address, *types.Transaction, *whitelist.Administration, error) {
+	//auth.Nonce = big.NewInt(int64(tranData.Nonce))
+	auth.GasLimit = big.NewInt(5500000)
+	auth.GasPrice = big.NewInt(38000000000)
+	address, tx, buyInfoC, err := whitelist.DeployAdministration(auth, conn, tranData.Admins)
+	if err != nil {
+		log.Printf("Failed to deploy new BuyInfo contract: %v\n", err)
+		return GetStubAddress(), nil, nil, err
+	}
+	log.Printf("Contract pending deploy: 0x%x\n", address)
+	log.Printf("Transaction waiting to be mined: 0x%x\n\n", tx.Hash())
+
+	return address, tx, buyInfoC, nil
+}
+
+type AdministrationData struct {
+	Nonce  uint64
+	Admins []common.Address
 }
