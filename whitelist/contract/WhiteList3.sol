@@ -29,8 +29,8 @@ contract Constants {
     ADDTRUSTEE,
     REMOVETRUSTEE
     }
-}
 
+}
 
 contract MutexProtected {
     // Mutex contract on all state mutating external/public functions for protecting against
@@ -55,14 +55,17 @@ contract Administration is Constants {
      *
     TODO LIST:
     2. Add Events for Adding\Removing admins and trustees
-    3. Save List of voting with status (?)
     4. Fix public modifiers for contract variables
     5. PGP - realize replacing of another's key via voting
     6. PGP  - save key's add/update date (???)
     7. Maybe refactor remove and add functions - separate self and others cases in distinct functions?
     8. Return voting contract address in CRUD functions
-    9. Maybe return in calback boolean value and then check it in Voting  ?
-    10. Extract timeouts of voting in constants or variables
+    9. Maybe return in callback boolean value and then check it in Voting  ?
+    10. Manipulate timeouts through votings ?
+    11. Realize algorithm of migration to other version of Admininstration
+    12. Save PGP history ?
+    13. Do recovery of key not only by voting but revealing hash of key
+    14. Clear archive of votings
      * **/
 
     address[]public trustees;
@@ -118,7 +121,7 @@ contract Administration is Constants {
     }
 
     function addAdmin(address _admin) callOnlyAdmin trusteeExists(_admin) notNull(_admin) doesNotAdmin(_admin) public {
-        createVoting(msg.sender, AdminAction.ADDADMIN, _admin, admins, VoteConsensus.ALL);
+        createVoting(msg.sender, AdminAction.ADDADMIN, _admin, admins, VoteConsensus.ALL, ADDADMINDURATION);
     }
 
     function removeAdmin(address _admin) callOnlyAdmin adminExists(_admin) public {
@@ -135,7 +138,7 @@ contract Administration is Constants {
         else {
             //remove contender from voters
             address[]memory voters = exCopyArray(admins, _admin);
-            createVoting(msg.sender, AdminAction.REMOVEADMIN, _admin, voters, VoteConsensus.ALL);
+            createVoting(msg.sender, AdminAction.REMOVEADMIN, _admin, voters, VoteConsensus.ALL, REMOVEADMINDURATION);
         }
     }
 
@@ -162,7 +165,7 @@ contract Administration is Constants {
     }
 
     function addTrustee(address _addr) callOnlyAdmin doesNotTrustee(_addr) public {
-        createVoting(msg.sender, AdminAction.ADDTRUSTEE, _addr, admins, VoteConsensus.HALF);
+        createVoting(msg.sender, AdminAction.ADDTRUSTEE, _addr, admins, VoteConsensus.HALF, ADDTRUSTEEDURATION);
     }
 
     function removeTrusted(address _addr) doesNotAdmin(_addr) public {
@@ -176,7 +179,7 @@ contract Administration is Constants {
             //check if caller is admin
             require(isAdmin(msg.sender));
             //by voting
-            createVoting(msg.sender, AdminAction.REMOVETRUSTEE, _addr, admins, VoteConsensus.HALF);
+            createVoting(msg.sender, AdminAction.REMOVETRUSTEE, _addr, admins, VoteConsensus.HALF, REMOVETRUSTEEDURATION);
         }
     }
 
@@ -187,28 +190,48 @@ contract Administration is Constants {
      *
      **/
 
+    struct Key {
+    uint date;
+    bytes32 value;
+    bool isActive;
+    }
+
     //PGP - FIXME define length of key
-    mapping (address => bytes32)keys;
+    mapping (address => Key)keys;
 
     //PGP Section
-    function addKey(bytes32 key) public callOnlyTrustee {
+    function updateKey(bytes32 _key) public callOnlyTrustee {
         //add key to keys
-        keys[msg.sender] = key;
+        //TODO separate self and others cases
+        keys[msg.sender] = Key({
+        date : now,
+        value : _key,
+        isActive : true
+        });
     }
 
     function getKey(address trustee) public constant returns (bytes32) {
-        return keys[trustee];
+        return keys[trustee].value;
     }
 
-    //FIXME check key's existance
+    //FIXME need more clear removing
     function removeKey(address _addr) private {
-        delete keys[_addr];
+        if (keys[_addr].isActive) {
+            delete keys[_addr];
+        }
     }
 
     /****
      * VOTING Section
      *
      ***/
+    //vote constants
+
+    uint constant ADDADMINDURATION = 120; //2 minutes
+    uint constant REMOVEADMINDURATION = 120; //2 minutes
+    uint constant ADDTRUSTEEDURATION = 60; // 1 minutes
+    uint constant REMOVETRUSTEEDURATION = 60; // 1 minutes
+
 
     struct Proposal {
     address voting;
@@ -218,12 +241,19 @@ contract Administration is Constants {
 
     Proposal public actual;
 
-    function createVoting(address owner, AdminAction action, address contender, address[] voters, VoteConsensus consensus) private {
+    struct ArchiveProposal {
+    Proposal proposal;
+    uint finishDate;
+    VoteResult tally;
+    }
+
+    ArchiveProposal[]public archiveProposals;
+
+    function createVoting(address owner, AdminAction action, address contender, address[] voters, VoteConsensus consensus, uint durationInSeconds) private {
         //no sumultaneous votings
         require(actual.voting == 0x0);
         //create votin contract
-        //FIXME set timeout constants
-        Voting voting = new Voting(owner, voters, consensus, 60);
+        Voting voting = new Voting(owner, voters, consensus, durationInSeconds);
         actual = Proposal({
         voting : voting,
         action : action,
@@ -234,6 +264,7 @@ contract Administration is Constants {
     function callback(VoteResult tally) public {
         //check if voting is created by this administration
         require(msg.sender == actual.voting);
+        //	ArchiveProposal memory arch;
         if (tally == VoteResult.SUCCESS) {//SUCCESS
             if (actual.action == AdminAction.ADDADMIN) {
                 //check is contender trustee yet and not admin
@@ -260,16 +291,30 @@ contract Administration is Constants {
                 //remove PGP
                 removeKey(actual.contender);
             }
-            //disable voting
+            //disable actual voting
             actual.voting = 0x0;
             actual.action = AdminAction.UNKNOWN;
             actual.contender = 0x0;
+            //archiveVoting
+            arch = ArchiveProposal({
+            proposal : actual,
+            finishDate : now,
+            tally : tally
+            });
+            archiveProposals.push(arch);
         }
-        else if (tally == VoteResult.FAIL || tally == VoteResult.CANCEL || tally == VoteResult.TIMEOUT) {//FAIL or CANCEL
-            //remove voting from actual; TODO save result in archive
+        else if (tally == VoteResult.FAIL || tally == VoteResult.CANCEL || tally == VoteResult.TIMEOUT) {//FAIL or CANCEL or TIMEOUT
+            //remove voting from actual;
             actual.voting = 0x0;
             actual.action = AdminAction.UNKNOWN;
             actual.contender = 0x0;
+            //archiveVoting
+            arch = ArchiveProposal({
+            proposal : actual,
+            finishDate : now,
+            tally : tally
+            });
+            archiveProposals.push(arch);
         }
     }
 
@@ -300,14 +345,12 @@ contract Administration is Constants {
     }
 }
 
-
 contract Voting is Constants, MutexProtected {
 
     /****
     TODO List
 
     1. Add Events
-
     4. Fix public modifiers
 
      *****/
@@ -346,7 +389,7 @@ contract Voting is Constants, MutexProtected {
 
     uint public neededAmount;
 
-    uint public timeout;
+    uint public timeoutTime;
 
     //constructor
     function Voting(address _owner, address[] _voters, VoteConsensus consensus, uint durationInSeconds) public {
@@ -383,12 +426,12 @@ contract Voting is Constants, MutexProtected {
             neededAmount == totaleligible;
         }
         //calc timeout time
-        timeout = now + durationInSeconds;
+        timeoutTime = now + durationInSeconds;
     }
 
     function getRemainsTime() public constant returns (uint) {
-        if (timeout >= now) {
-            return timeout - now;
+        if (timeoutTime >= now) {
+            return timeoutTime - now;
         }
         return 0;
     }
@@ -424,7 +467,7 @@ contract Voting is Constants, MutexProtected {
         bool enoughVoted = (totalvoted >= neededAmount);
 
         if (timeIsGone) {
-            if (enoughVoted) {
+            if (enoughVoted) {// if the voting time has expired, but the votes are enough to get the result
                 //calc result
                 calcResult();
             }
@@ -436,8 +479,8 @@ contract Voting is Constants, MutexProtected {
                 Administration(administration).callback(tally);
             }
         }
-        else {
-            if (allVote) {
+        else {//voting is still going
+            if (allVote) {// get all votes - nothing will change
                 //calc result
                 calcResult();
             }
