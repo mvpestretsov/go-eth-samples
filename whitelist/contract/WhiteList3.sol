@@ -56,21 +56,23 @@ contract Administration is Constants {
     TODO LIST:
     2. Add Events for Adding\Removing admins and trustees
     4. Fix public modifiers for contract variables
-    5. PGP - realize replacing of another's key via voting
-    6. PGP  - save key's add/update date (???)
+    5. PKI - realize replacing of another's key via voting
+    6. PKI  - save key's add/update date (???)
     7. Maybe refactor remove and add functions - separate self and others cases in distinct functions?
     8. Return voting contract address in CRUD functions
-    9. Maybe return in callback boolean value and then check it in Voting  ?
-    10. Manipulate timeouts through votings ?
+    10. Manipulate timeout's values through votings ?
     11. Realize algorithm of migration to other version of Admininstration
-    12. Save PGP history ?
-    13. Do recovery of key not only by voting but revealing hash of key
-    14. Clear archive of votings
+    13. Do recovery of key not only by voting but with revealing hash of key
+    14. Clear archive of votings by time
+    15. Need remove title for removed trustee
+    16. How to participant add self to trustee ? through voting ?
      * **/
 
     address[]public trustees;
 
     address[]public admins;
+
+    mapping (address => string)public titles;
 
     mapping (address => bool)public trueAdmin;
 
@@ -172,7 +174,7 @@ contract Administration is Constants {
         if (msg.sender == _addr) {//trustee may remove himself without voting
             trueTrustee[_addr] = false;
             trustees = removeFromArray(trustees, _addr);
-            //remove PGP
+            //remove PKI
             removeKey(_addr);
         }
         else {
@@ -183,8 +185,17 @@ contract Administration is Constants {
         }
     }
 
+    function getTitle(address _trustee) public constant returns (string) {
+        return titles[_trustee];
+    }
+
+    function setTitle(string _title) public callOnlyTrustee {
+        assert(utfStringLength(_title) > 0);
+        titles[msg.sender] = _title;
+    }
+
     /***
-     * PGP Section
+     * PKI Section
      *
      *
      *
@@ -196,28 +207,47 @@ contract Administration is Constants {
     bool isActive;
     }
 
-    //PGP - FIXME define length of key
-    mapping (address => Key)keys;
+    //PKI - FIXME define length of key
+    mapping (address => Key)public activeKeys;
 
-    //PGP Section
-    function updateKey(bytes32 _key) public callOnlyTrustee {
-        //add key to keys
-        //TODO separate self and others cases
-        keys[msg.sender] = Key({
+    mapping (address => Key[])public archiveKeys;
+
+    //PKI Section
+    function addOrUpdateKey(bytes32 _key) public callOnlyTrustee {
+        //TODO must separate self and others cases
+        //check does active key exist
+        if (activeKeys[msg.sender].isActive) {
+            //save current key to archive
+            Key memory oldKey = Key({
+            date : activeKeys[msg.sender].date,
+            value : activeKeys[msg.sender].value,
+            isActive : false
+            });
+            archiveKeys[msg.sender].push(oldKey);
+
+        }
+        //make new Key
+        activeKeys[msg.sender] = Key({
         date : now,
         value : _key,
         isActive : true
         });
     }
 
-    function getKey(address trustee) public constant returns (bytes32) {
-        return keys[trustee].value;
+    function getKey(address trustee) public constant returns (bool, bytes32) {
+        return (activeKeys[trustee].isActive, activeKeys[trustee].value);
     }
 
-    //FIXME need more clear removing
-    function removeKey(address _addr) private {
-        if (keys[_addr].isActive) {
-            delete keys[_addr];
+    function removeOwnKey() public callOnlyTrustee {
+        if (activeKeys[msg.sender].isActive) {//if keys exists
+            delete activeKeys[msg.sender];
+        }
+    }
+
+    //remove key of participant
+    function removeKey(address trustee) private {
+        if (activeKeys[trustee].isActive) {//if keys exists
+            delete activeKeys[trustee];
         }
     }
 
@@ -247,7 +277,7 @@ contract Administration is Constants {
     VoteResult tally;
     }
 
-    ArchiveProposal[]public archiveProposals;
+    ArchiveProposal[]archiveProposals;
 
     function createVoting(address owner, AdminAction action, address contender, address[] voters, VoteConsensus consensus, uint durationInSeconds) private {
         //no sumultaneous votings
@@ -264,7 +294,11 @@ contract Administration is Constants {
     function callback(VoteResult tally) public {
         //check if voting is created by this administration
         require(msg.sender == actual.voting);
-        //	ArchiveProposal memory arch;
+        ArchiveProposal memory arch = ArchiveProposal({
+        proposal : actual,
+        finishDate : now,
+        tally : tally
+        });
         if (tally == VoteResult.SUCCESS) {//SUCCESS
             if (actual.action == AdminAction.ADDADMIN) {
                 //check is contender trustee yet and not admin
@@ -288,7 +322,7 @@ contract Administration is Constants {
             if (actual.action == AdminAction.REMOVETRUSTEE) {
                 trustees = removeFromArray(trustees, actual.contender);
                 delete trueTrustee[actual.contender];
-                //remove PGP
+                //remove PKI
                 removeKey(actual.contender);
             }
             //disable actual voting
@@ -296,11 +330,6 @@ contract Administration is Constants {
             actual.action = AdminAction.UNKNOWN;
             actual.contender = 0x0;
             //archiveVoting
-            arch = ArchiveProposal({
-            proposal : actual,
-            finishDate : now,
-            tally : tally
-            });
             archiveProposals.push(arch);
         }
         else if (tally == VoteResult.FAIL || tally == VoteResult.CANCEL || tally == VoteResult.TIMEOUT) {//FAIL or CANCEL or TIMEOUT
@@ -309,11 +338,6 @@ contract Administration is Constants {
             actual.action = AdminAction.UNKNOWN;
             actual.contender = 0x0;
             //archiveVoting
-            arch = ArchiveProposal({
-            proposal : actual,
-            finishDate : now,
-            tally : tally
-            });
             archiveProposals.push(arch);
         }
     }
@@ -342,6 +366,27 @@ contract Administration is Constants {
             }
         }
         return dArray;
+    }
+
+    function utfStringLength(string str) internal pure
+    returns (uint length) {
+        uint i = 0;
+        bytes memory string_rep = bytes(str);
+        while (i < string_rep.length) {
+            if (string_rep[i] >> 7 == 0)
+            i += 1;
+            else if (string_rep[i] >> 5 == 0x6)
+            i += 2;
+            else if (string_rep[i] >> 4 == 0xE)
+            i += 3;
+            else if (string_rep[i] >> 3 == 0x1E)
+            i += 4;
+            else
+            //For safety
+            i += 1;
+
+            length++;
+        }
     }
 }
 
